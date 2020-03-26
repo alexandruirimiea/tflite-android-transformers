@@ -33,12 +33,15 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
 import org.tensorflow.lite.Interpreter;
+import org.tensorflow.lite.gpu.GpuDelegate;
 
 /** Interface to load TfLite model and provide predictions. */
 public class QaClient {
   private static final String TAG = "BertDemo";
-  private static final String MODEL_PATH = "model.tflite";
+//  private static final String MODEL_PATH = "model.tflite";
   private static final String DIC_PATH = "vocab.txt";
 
   private static final int MAX_ANS_LEN = 32;
@@ -63,14 +66,42 @@ public class QaClient {
     this.featureConverter = new FeatureConverter(dic, DO_LOWER_CASE, MAX_QUERY_LEN, MAX_SEQ_LEN);
   }
 
+//  @WorkerThread
+//  public synchronized void loadModel() {
+//    try {
+//      ByteBuffer buffer = loadModelFile(this.context.getAssets());
+////      Interpreter.Options opt = (new Interpreter.Options()).addDelegate(delegate);
+//
+//      Interpreter.Options opt = new Interpreter.Options();
+//      GpuDelegate delegate = new GpuDelegate();
+//      opt.addDelegate(delegate);
+//
+////      opt.setNumThreads(NUM_LITE_THREADS);
+//      tflite = new Interpreter(buffer, opt);
+//      Log.v(TAG, "TFLite model loaded.");
+//    } catch (IOException ex) {
+//      Log.e(TAG, ex.getMessage());
+//    }
+//  }
+
+  boolean enableGpuDelegate = true;
+
   @WorkerThread
-  public synchronized void loadModel() {
+  public synchronized void loadModel(String modelName) {
     try {
-      ByteBuffer buffer = loadModelFile(this.context.getAssets());
+      ByteBuffer buffer = loadModelFile(this.context.getAssets(), modelName);
       Interpreter.Options opt = new Interpreter.Options();
+
+
+      if(enableGpuDelegate) {
+        GpuDelegate delegate = new GpuDelegate();
+        opt.addDelegate(delegate);
+      }
+
       opt.setNumThreads(NUM_LITE_THREADS);
+
       tflite = new Interpreter(buffer, opt);
-      Log.v(TAG, "TFLite model loaded.");
+      Log.v(TAG, "TFLite model loaded: " + (enableGpuDelegate ? "GPU": "CPU"));
     } catch (IOException ex) {
       Log.e(TAG, ex.getMessage());
     }
@@ -92,10 +123,23 @@ public class QaClient {
     dic.clear();
   }
 
+//  /** Load tflite model from assets. */
+//  public MappedByteBuffer loadModelFile(AssetManager assetManager) throws IOException {
+//    try (AssetFileDescriptor fileDescriptor = assetManager.openFd(MODEL_PATH);
+//         FileInputStream inputStream = new FileInputStream(fileDescriptor.getFileDescriptor())) {
+//      FileChannel fileChannel = inputStream.getChannel();
+//      long startOffset = fileDescriptor.getStartOffset();
+//      long declaredLength = fileDescriptor.getDeclaredLength();
+//      return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
+//    }
+//  }
+
   /** Load tflite model from assets. */
-  public MappedByteBuffer loadModelFile(AssetManager assetManager) throws IOException {
-    try (AssetFileDescriptor fileDescriptor = assetManager.openFd(MODEL_PATH);
-        FileInputStream inputStream = new FileInputStream(fileDescriptor.getFileDescriptor())) {
+  public MappedByteBuffer loadModelFile(AssetManager assetManager, String modelName) throws IOException {
+  //    File file = new File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), modelName);
+  //    Log.v(TAG, "File path: " + file.getAbsolutePath());
+    try (AssetFileDescriptor fileDescriptor = assetManager.openFd(modelName);
+         FileInputStream inputStream = new FileInputStream(fileDescriptor.getFileDescriptor())) {
       FileChannel fileChannel = inputStream.getChannel();
       long startOffset = fileDescriptor.getStartOffset();
       long declaredLength = fileDescriptor.getDeclaredLength();
@@ -115,6 +159,45 @@ public class QaClient {
     }
   }
 
+  //// Models were exported with the following bash script:
+  /*
+  #!/bin/bash
+
+  for hiddenLayers in $(seq 2 2 12); do
+    for attentionLayers in 2 4 8 12; do
+      hiddenSize=$((attentionLayers*64))
+      for max_seq_length in 384 ; do
+        modelName="uncased_L-${hiddenLayers}_H-${hiddenSize}_A-${attentionLayers}"
+        modelDir="./data/bert_24/${modelName}"
+        echo ${modelDir}
+
+        python3 run_ckpt_model.py --mode lite \
+        --bert_config_file ${modelDir}/bert_config.json \
+        --ckpt_file ${modelDir}/bert_model.ckpt \
+        --max_seq_length ${max_seq_length} \
+        --output_dir data/bert_24/tflite_models \
+        --output_name ${modelName}
+      done
+    done
+  done
+   */
+
+  public List<String> getModelNames() {
+    List<String> modelNames = new ArrayList<String>();
+//    modelNames.add("uncased_L-12_H-256_A-4.tflite");
+
+    for(int hiddenLayers = 2; hiddenLayers <= 12; hiddenLayers+=2) {
+      for(int attentionHeads : new int[] {2, 4, 8, 12}) {
+        int hiddenSize = attentionHeads * 64;
+        String modelName = "uncased_L-" + hiddenLayers + "_H-"
+                + hiddenSize + "_A-" + attentionHeads + ".tflite";
+        modelNames.add(modelName);
+      }
+    }
+
+    return modelNames;
+  }
+
   /**
    * Input: Original content and query for the QA task. Later converted to Feature by
    * FeatureConverter. Output: A String[] array of answers and a float[] array of corresponding
@@ -122,7 +205,7 @@ public class QaClient {
    */
   @WorkerThread
   public synchronized List<QaAnswer> predict(String query, String content) {
-    Log.v(TAG, "TFLite model: " + MODEL_PATH + " running...");
+//    Log.v(TAG, "TFLite model: " + MODEL_PATH + " running...");
     Log.v(TAG, "Convert Feature...");
     Feature feature = featureConverter.convert(query, content);
 
@@ -130,7 +213,8 @@ public class QaClient {
     int[][] inputIds = new int[1][MAX_SEQ_LEN];
 //    int[][] inputMask = new int[1][MAX_SEQ_LEN];
 //    int[][] segmentIds = new int[1][MAX_SEQ_LEN];
-    float[][] startLogits = new float[1][MAX_SEQ_LEN];
+//    float[][] startLogits = new float[1][MAX_SEQ_LEN];
+    float[][] probTensor = new float[1][2];
     float[][] endLogits = new float[1][MAX_SEQ_LEN];
 
     for (int j = 0; j < MAX_SEQ_LEN; j++) {
@@ -141,14 +225,39 @@ public class QaClient {
 
 //    Object[] inputs = {inputIds, inputMask, segmentIds};
     Map<Integer, Object> output = new HashMap<>();
-    output.put(0, startLogits);
-    output.put(1, endLogits);
+    output.put(0, probTensor);
+//    output.put(1, endLogits);
 
     Log.v(TAG, "Run inference...");
-    tflite.runForMultipleInputsOutputs(new Object[] { inputIds }, output);
+    List<String> modelNames = getModelNames();
+
+    for (String modelName : modelNames) {
+      loadModel(modelName);
+      Log.v(TAG, "##### " + modelName);
+      DescriptiveStatistics stats = new DescriptiveStatistics();
+      
+      for (int i = 0; i < 10; i++) {
+        long beforeTime = System.currentTimeMillis();
+        tflite.runForMultipleInputsOutputs(new Object[]{inputIds}, output);
+        long afterTime = System.currentTimeMillis();
+        double totalMilliseconds = (afterTime - beforeTime);
+
+        Log.v(TAG, modelName + ", iteration " + i + ", latency: " + totalMilliseconds + " s");
+
+        if(i == 0) {
+          Log.v(TAG, "Ignoring the first inference");
+          continue;
+        }
+
+        stats.addValue(totalMilliseconds);
+      }
+
+      Log.v(TAG,"Mean latency: " + stats.getMean() + " ms, std: " + stats.getStandardDeviation() + ", " + modelName + " " + (enableGpuDelegate ? "GPU" : "CPU"));
+    }
 
     Log.v(TAG, "Convert answers...");
-    List<QaAnswer> answers = getBestAnswers(startLogits[0], endLogits[0], feature);
+    List<QaAnswer> answers = new ArrayList<>(); //getBestAnswers(probTensor[0], endLogits[0], feature);
+    answers.add(new QaAnswer("[DEFAULT]", 0, 0, 0));
     Log.v(TAG, "Finish.");
     return answers;
   }

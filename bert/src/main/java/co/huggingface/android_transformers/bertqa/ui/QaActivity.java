@@ -149,7 +149,7 @@ public class QaActivity extends AppCompatActivity {
     super.onStart();
     handler.post(
         () -> {
-          qaClient.loadModel();
+//          qaClient.loadModel();
           qaClient.loadDictionary();
         });
 
